@@ -2,55 +2,18 @@ import * as cdk from 'aws-cdk-lib';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as kms from 'aws-cdk-lib/aws-kms';
 import * as logs from 'aws-cdk-lib/aws-logs';
-import * as iam from 'aws-cdk-lib/aws-iam';
 import { Construct } from 'constructs';
+
+interface NetworkingStackProps extends cdk.StackProps {
+  kmsKey: kms.Key;
+}
 
 export class NetworkingStack extends cdk.Stack {
   public readonly vpc: ec2.Vpc;
-  public readonly kmsKey: kms.Key;
   public readonly apiGwVpcEndpoint: ec2.InterfaceVpcEndpoint;
 
-  constructor(scope: Construct, id: string, props: cdk.StackProps) {
+  constructor(scope: Construct, id: string, props: NetworkingStackProps) {
     super(scope, id, props);
-
-    // Customer-managed KMS key — used for all encryption across stacks
-    this.kmsKey = new kms.Key(this, 'PlatformKey', {
-      description: 'CMK for Cloud Acceleration platform — NIST SC-28',
-      enableKeyRotation: true,          // NIST SC-12: annual rotation
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
-      policy: new iam.PolicyDocument({
-        statements: [
-          new iam.PolicyStatement({
-            sid: 'RootAccess',
-            principals: [new iam.AccountRootPrincipal()],
-            actions: ['kms:*'],
-            resources: ['*'],
-          }),
-          new iam.PolicyStatement({
-            sid: 'CloudWatchLogs',
-            principals: [new iam.ServicePrincipal(`logs.${this.region}.amazonaws.com`)],
-            actions: ['kms:Encrypt*', 'kms:Decrypt*', 'kms:ReEncrypt*', 'kms:GenerateDataKey*', 'kms:Describe*'],
-            resources: ['*'],
-            conditions: {
-              ArnLike: {
-                'kms:EncryptionContext:aws:logs:arn': `arn:aws:logs:${this.region}:${this.account}:*`,
-              },
-            },
-          }),
-          new iam.PolicyStatement({
-            sid: 'SNSService',
-            principals: [new iam.ServicePrincipal('sns.amazonaws.com')],
-            actions: ['kms:Decrypt', 'kms:GenerateDataKey*'],
-            resources: ['*'],
-          }),
-        ],
-      }),
-    });
-
-    new kms.Alias(this, 'PlatformKeyAlias', {
-      aliasName: 'alias/cloud-acceleration-platform',
-      targetKey: this.kmsKey,
-    });
 
     // Fully private VPC — no internet gateway, no NAT gateway (NIST SC-7)
     this.vpc = new ec2.Vpc(this, 'PrivateVpc', {
@@ -72,7 +35,7 @@ export class NetworkingStack extends cdk.Stack {
     const flowLogGroup = new logs.LogGroup(this, 'VpcFlowLogs', {
       logGroupName: '/cloud-acceleration/vpc-flow-logs',
       retention: logs.RetentionDays.ONE_YEAR,
-      encryptionKey: this.kmsKey,
+      encryptionKey: props.kmsKey,
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
@@ -176,8 +139,6 @@ export class NetworkingStack extends cdk.Stack {
       privateDnsEnabled: true,
     });
 
-    // Outputs
     new cdk.CfnOutput(this, 'VpcId', { value: this.vpc.vpcId });
-    new cdk.CfnOutput(this, 'KmsKeyArn', { value: this.kmsKey.keyArn });
   }
 }

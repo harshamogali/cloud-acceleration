@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import 'source-map-support/register';
 import * as cdk from 'aws-cdk-lib';
+import { KmsStack } from '../lib/stacks/kms-stack';
 import { NetworkingStack } from '../lib/stacks/networking-stack';
 import { DataStack } from '../lib/stacks/data-stack';
 import { ApiStack } from '../lib/stacks/api-stack';
@@ -22,19 +23,25 @@ const tags = {
   Owner: 'platform-engineering',
 };
 
-const networking = new NetworkingStack(app, 'CloudAccelNetworking', { env, tags });
+const kms = new KmsStack(app, 'CloudAccelKms', { env, tags });
+
+const networking = new NetworkingStack(app, 'CloudAccelNetworking', {
+  env,
+  tags,
+  kmsKey: kms.key,
+});
 
 const data = new DataStack(app, 'CloudAccelData', {
   env,
   tags,
   vpc: networking.vpc,
-  kmsKey: networking.kmsKey,
+  kmsKey: kms.key,
 });
 
 const alerting = new AlertingStack(app, 'CloudAccelAlerting', {
   env,
   tags,
-  kmsKey: networking.kmsKey,
+  kmsKey: kms.key,
 });
 
 const api = new ApiStack(app, 'CloudAccelApi', {
@@ -42,7 +49,7 @@ const api = new ApiStack(app, 'CloudAccelApi', {
   tags,
   vpc: networking.vpc,
   table: data.table,
-  kmsKey: networking.kmsKey,
+  kmsKey: kms.key,
   pagerDutyTopicArn: alerting.pagerDutyTopic.topicArn,
   vpcEndpointId: networking.apiGwVpcEndpoint.vpcEndpointId,
 });
@@ -51,7 +58,7 @@ const privateLink = new PrivateLinkStack(app, 'CloudAccelPrivateLink', {
   env,
   tags,
   vpc: networking.vpc,
-  kmsKey: networking.kmsKey,
+  kmsKey: kms.key,
   apiGwVpcEndpoint: networking.apiGwVpcEndpoint,
   // allowedConsumerPrincipals: [new iam.ArnPrincipal('arn:aws:iam::CONSUMER_ACCOUNT_ID:root')],
 });
@@ -60,7 +67,7 @@ new ObservabilityStack(app, 'CloudAccelObservability', {
   env,
   tags,
   vpc: networking.vpc,
-  kmsKey: networking.kmsKey,
+  kmsKey: kms.key,
   table: data.table,
   apiFunction: api.apiFunction,
   authorizerFunction: api.authorizerFunction,
