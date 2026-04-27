@@ -30,6 +30,7 @@ export class DataStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.RETAIN,
       tableClass: dynamodb.TableClass.STANDARD,
       contributorInsightsSpecification: { enabled: true },
+      timeToLiveAttribute: 'ttl',
     });
 
     // GSI for querying by entity type
@@ -107,13 +108,16 @@ export class DataStack extends cdk.Stack {
       allowRestores: true,
     });
 
-    // Resource policy: deny unencrypted transport — NIST SC-8
+    // Resource policy: deny unencrypted transport — NIST SC-8.
+    // Use '*' instead of the table ARN: the policy is already scoped to this table
+    // (inline resource policy), and referencing Fn::GetAtt on the same resource
+    // creates a CloudFormation circular dependency.
     this.table.addToResourcePolicy(new iam.PolicyStatement({
       sid: 'DenyNonTLS',
       effect: iam.Effect.DENY,
       principals: [new iam.AnyPrincipal()],
       actions: ['dynamodb:*'],
-      resources: [this.table.tableArn, `${this.table.tableArn}/*`],
+      resources: ['*'],
       conditions: {
         Bool: { 'aws:SecureTransport': 'false' },
       },

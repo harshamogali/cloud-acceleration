@@ -60,20 +60,34 @@ async function handleHealth(): Promise<APIGatewayProxyResult> {
   return response(200, { status: 'healthy', timestamp: new Date().toISOString() });
 }
 
-async function listItems(principalId: string): Promise<APIGatewayProxyResult> {
+async function listItems(principalId: string, nextToken?: string): Promise<APIGatewayProxyResult> {
   const start = Date.now();
+
+  let exclusiveStartKey: Record<string, unknown> | undefined;
+  if (nextToken) {
+    try {
+      exclusiveStartKey = JSON.parse(Buffer.from(nextToken, 'base64url').toString('utf-8'));
+    } catch {
+      return response(400, { error: 'Invalid pagination token' });
+    }
+  }
+
   const result = await ddb.send(new QueryCommand({
     TableName: TABLE_NAME,
     KeyConditionExpression: 'pk = :pk AND begins_with(sk, :prefix)',
-    ExpressionAttributeValues: marshall({
-      ':pk': `USER#${principalId}`,
-      ':prefix': 'ITEM#',
-    }),
+    ExpressionAttributeValues: marshall({ ':pk': `USER#${principalId}`, ':prefix': 'ITEM#' }),
     Limit: 100,
+    ExclusiveStartKey: exclusiveStartKey ? marshall(exclusiveStartKey) : undefined,
   }));
+
   await emitLatency('ListItems', Date.now() - start);
-  const items = (result.Items ?? []).map(unmarshall);
-  return response(200, { items, count: items.length });
+
+  const items = (result.Items ?? []).map(item => unmarshall(item));
+  const responseNextToken = result.LastEvaluatedKey
+    ? Buffer.from(JSON.stringify(unmarshall(result.LastEvaluatedKey))).toString('base64url')
+    : undefined;
+
+  return response(200, { items, count: items.length, nextToken: responseNextToken });
 }
 
 async function getItem(principalId: string, id: string): Promise<APIGatewayProxyResult> {
@@ -145,16 +159,20 @@ async function updateItem(principalId: string, id: string, body: string | null):
 
 async function deleteItem(principalId: string, id: string): Promise<APIGatewayProxyResult> {
   const start = Date.now();
-  await ddb.send(new DeleteItemCommand({
-    TableName: TABLE_NAME,
-    Key: marshall({ pk: `USER#${principalId}`, sk: `ITEM#${id}` }),
-    ConditionExpression: 'attribute_exists(pk)',
-  })).catch((err) => {
-    if (err.name === 'ConditionalCheckFailedException') return;
+  try {
+    await ddb.send(new DeleteItemCommand({
+      TableName: TABLE_NAME,
+      Key: marshall({ pk: `USER#${principalId}`, sk: `ITEM#${id}` }),
+      ConditionExpression: 'attribute_exists(pk)',
+    }));
+    await emitLatency('DeleteItem', Date.now() - start);
+    return response(204, {});
+  } catch (err: unknown) {
+    if (err instanceof Error && err.name === 'ConditionalCheckFailedException') {
+      return response(404, { error: 'Not found' });
+    }
     throw err;
-  });
-  await emitLatency('DeleteItem', Date.now() - start);
-  return response(204, {});
+  }
 }
 
 export const handler = async (
@@ -176,7 +194,7 @@ export const handler = async (
 
   try {
     if (path === '/health' && method === 'GET') return await handleHealth();
-    if (path === '/items' && method === 'GET') return await listItems(principalId);
+    if (path === '/items' && method === 'GET') return await listItems(principalId, event.queryStringParameters?.nextToken ?? undefined);
     if (path === '/items' && method === 'POST') return await createItem(principalId, event.body);
     if (path === '/items/{id}' && method === 'GET' && id) return await getItem(principalId, id);
     if (path === '/items/{id}' && method === 'PUT' && id) return await updateItem(principalId, id, event.body);

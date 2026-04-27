@@ -6,6 +6,8 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { Construct } from 'constructs';
+import * as path from 'path';
+import { VpcLambdaFunction } from '../constructs/vpc-lambda-function';
 
 interface AuthorizerStackProps extends cdk.StackProps {
   vpc: ec2.Vpc;
@@ -15,6 +17,7 @@ interface AuthorizerStackProps extends cdk.StackProps {
 export class AuthorizerStack extends cdk.Stack {
   public readonly authorizerFunction: lambda.Function;
   public readonly jwtSecret: secretsmanager.Secret;
+  public readonly logGroup: logs.LogGroup;
 
   constructor(scope: Construct, id: string, props: AuthorizerStackProps) {
     super(scope, id, props);
@@ -28,71 +31,30 @@ export class AuthorizerStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
-    const sg = new ec2.SecurityGroup(this, 'Sg', {
+    const vpcFn = new VpcLambdaFunction(this, 'Authorizer', {
       vpc: props.vpc,
-      description: 'Authorizer Lambda — outbound to VPC endpoints only',
-      allowAllOutbound: false,
-    });
-    sg.addEgressRule(ec2.Peer.ipv4(props.vpc.vpcCidrBlock), ec2.Port.tcp(443), 'HTTPS to VPC endpoints');
-
-    const logGroup = new logs.LogGroup(this, 'Logs', {
-      logGroupName: '/cloud-acceleration/authorizer',
-      retention: logs.RetentionDays.ONE_YEAR,
-      encryptionKey: props.kmsKey,
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
-    });
-
-    const role = new iam.Role(this, 'Role', {
-      assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
-      description: 'Lambda authorizer execution role',
-    });
-    role.addManagedPolicy(iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaVPCAccessExecutionRole'));
-    role.addToPolicy(new iam.PolicyStatement({
-      actions: ['logs:CreateLogStream', 'logs:PutLogEvents'],
-      resources: [logGroup.logGroupArn],
-    }));
-    role.addToPolicy(new iam.PolicyStatement({
-      actions: ['secretsmanager:GetSecretValue'],
-      resources: [this.jwtSecret.secretArn],
-    }));
-    role.addToPolicy(new iam.PolicyStatement({
-      actions: ['kms:Decrypt', 'kms:GenerateDataKey'],
-      resources: [props.kmsKey.keyArn],
-    }));
-    role.addToPolicy(new iam.PolicyStatement({
-      actions: ['xray:PutTraceSegments', 'xray:PutTelemetryRecords'],
-      resources: ['*'],
-    }));
-    role.addToPolicy(new iam.PolicyStatement({
-      actions: ['cloudwatch:PutMetricData'],
-      resources: ['*'],
-      conditions: { StringEquals: { 'cloudwatch:namespace': 'CloudAcceleration/Authorizer' } },
-    }));
-
-    this.authorizerFunction = new lambda.Function(this, 'Function', {
+      kmsKey: props.kmsKey,
       functionName: 'cloud-acceleration-authorizer',
-      runtime: lambda.Runtime.NODEJS_22_X,
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset('lambda/authorizer'),
-      role,
-      logGroup,
-      vpc: props.vpc,
-      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_ISOLATED },
-      securityGroups: [sg],
-      tracing: lambda.Tracing.ACTIVE,
-      insightsVersion: lambda.LambdaInsightsVersion.VERSION_1_0_229_0,
-      architecture: lambda.Architecture.ARM_64,
-      memorySize: 512,
-      timeout: cdk.Duration.seconds(29),
-      environmentEncryption: props.kmsKey,
+      entry: path.join(__dirname, '../../lambda/authorizer/index.ts'),
+      logGroupName: '/cloud-acceleration/authorizer',
+      extraPolicies: [
+        new iam.PolicyStatement({
+          actions: ['secretsmanager:GetSecretValue'],
+          resources: [this.jwtSecret.secretArn],
+        }),
+        new iam.PolicyStatement({
+          actions: ['cloudwatch:PutMetricData'],
+          resources: ['*'],
+          conditions: { StringEquals: { 'cloudwatch:namespace': 'CloudAcceleration/Authorizer' } },
+        }),
+      ],
       environment: {
         JWT_SECRET_ARN: this.jwtSecret.secretArn,
-        AWS_NODEJS_CONNECTION_REUSE_ENABLED: '1',
-        NODE_OPTIONS: '--enable-source-maps',
-        POWERTOOLS_SERVICE_NAME: 'cloud-acceleration',
-        LOG_LEVEL: 'INFO',
       },
     });
+
+    this.authorizerFunction = vpcFn.function;
+    this.logGroup = vpcFn.logGroup;
 
     new cdk.CfnOutput(this, 'FunctionArn', { value: this.authorizerFunction.functionArn });
     new cdk.CfnOutput(this, 'JwtSecretArn', { value: this.jwtSecret.secretArn });

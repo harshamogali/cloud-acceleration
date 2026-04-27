@@ -21,6 +21,12 @@ interface ObservabilityStackProps extends cdk.StackProps {
   alarmTopic: sns.Topic;
   restApi: apigateway.RestApi;
   privateLinkStack: PrivateLinkStack;
+  authorizerLogGroup: logs.ILogGroup;
+  proberLogGroup: logs.ILogGroup;
+}
+
+interface MetricFilters {
+  authFailureMetric: cloudwatch.Metric;
 }
 
 export class ObservabilityStack extends cdk.Stack {
@@ -29,11 +35,28 @@ export class ObservabilityStack extends cdk.Stack {
 
     const alarmAction = new cloudwatch_actions.SnsAction(props.alarmTopic);
 
-    // ─── Custom Metric Filters ─────────────────────────────────────────────────
+    const { authFailureMetric } = this.createMetricFilters(props);
+    const { alarms, proberAvailabilityAlarm, apiErrorRateAlarm } = this.createAlarms(props, alarmAction, authFailureMetric);
+    this.createDashboard(props, alarms, authFailureMetric);
 
-    // Auth failures metric from authorizer log group
+    // SLO composite alarm — triggers PagerDuty P1 on any critical condition
+    new cloudwatch.CompositeAlarm(this, 'CriticalSloAlarm', {
+      compositeAlarmName: 'cloud-acceleration-slo-critical',
+      alarmDescription: 'P1: Critical SLO breach — immediate response required',
+      alarmRule: cloudwatch.AlarmRule.anyOf(
+        cloudwatch.AlarmRule.fromAlarm(proberAvailabilityAlarm, cloudwatch.AlarmState.ALARM),
+        cloudwatch.AlarmRule.fromAlarm(apiErrorRateAlarm, cloudwatch.AlarmState.ALARM),
+      ),
+    });
+
+    new cdk.CfnOutput(this, 'DashboardUrl', {
+      value: `https://${this.region}.console.aws.amazon.com/cloudwatch/home#dashboards:name=CloudAcceleration-Operations`,
+    });
+  }
+
+  private createMetricFilters(props: ObservabilityStackProps): MetricFilters {
     const authFailureFilter = new logs.MetricFilter(this, 'AuthFailureFilter', {
-      logGroup: logs.LogGroup.fromLogGroupName(this, 'AuthLogGroup', '/cloud-acceleration/authorizer'),
+      logGroup: props.authorizerLogGroup,
       filterPattern: logs.FilterPattern.all(
         logs.FilterPattern.stringValue('$.level', '=', 'WARN'),
         logs.FilterPattern.stringValue('$.message', '=', '*UNAUTHORIZED*'),
@@ -44,14 +67,8 @@ export class ObservabilityStack extends cdk.Stack {
       defaultValue: 0,
     });
 
-    const authFailureMetric = authFailureFilter.metric({
-      statistic: 'Sum',
-      period: cdk.Duration.minutes(5),
-    });
-
-    // Prober availability metric
-    const proberAvailabilityFilter = new logs.MetricFilter(this, 'ProberAvailabilityFilter', {
-      logGroup: logs.LogGroup.fromLogGroupName(this, 'ProberLogGroup', '/cloud-acceleration/prober'),
+    new logs.MetricFilter(this, 'ProberAvailabilityFilter', {
+      logGroup: props.proberLogGroup,
       filterPattern: logs.FilterPattern.exists('$.availability'),
       metricNamespace: 'CloudAcceleration/Prober',
       metricName: 'Availability',
@@ -59,8 +76,8 @@ export class ObservabilityStack extends cdk.Stack {
       defaultValue: 0,
     });
 
-    const proberLatencyFilter = new logs.MetricFilter(this, 'ProberLatencyFilter', {
-      logGroup: logs.LogGroup.fromLogGroupName(this, 'ProberLogGroupLatency', '/cloud-acceleration/prober'),
+    new logs.MetricFilter(this, 'ProberLatencyFilter', {
+      logGroup: props.proberLogGroup,
       filterPattern: logs.FilterPattern.exists('$.latencyMs'),
       metricNamespace: 'CloudAcceleration/Prober',
       metricName: 'FunctionalLatency',
@@ -68,11 +85,25 @@ export class ObservabilityStack extends cdk.Stack {
       defaultValue: 0,
     });
 
-    // ─── Alarms ────────────────────────────────────────────────────────────────
+    return {
+      authFailureMetric: authFailureFilter.metric({ statistic: 'Sum', period: cdk.Duration.minutes(5) }),
+    };
+  }
 
+  private createAlarms(
+    props: ObservabilityStackProps,
+    alarmAction: cloudwatch_actions.SnsAction,
+    authFailureMetric: cloudwatch.Metric,
+  ): { alarms: cloudwatch.Alarm[]; proberAvailabilityAlarm: cloudwatch.Alarm; apiErrorRateAlarm: cloudwatch.Alarm } {
     const alarms: cloudwatch.Alarm[] = [];
 
-    // API Lambda errors > 1% over 5 min
+    const addAlarm = (alarm: cloudwatch.Alarm): cloudwatch.Alarm => {
+      alarm.addAlarmAction(alarmAction);
+      alarm.addOkAction(alarmAction);
+      alarms.push(alarm);
+      return alarm;
+    };
+
     const apiErrorRate = new cloudwatch.MathExpression({
       expression: '(errors / invocations) * 100',
       usingMetrics: {
@@ -83,7 +114,7 @@ export class ObservabilityStack extends cdk.Stack {
       period: cdk.Duration.minutes(5),
     });
 
-    alarms.push(new cloudwatch.Alarm(this, 'ApiErrorRateAlarm', {
+    const apiErrorRateAlarm = addAlarm(new cloudwatch.Alarm(this, 'ApiErrorRateAlarm', {
       alarmName: 'cloud-acceleration-api-error-rate',
       alarmDescription: 'API Lambda error rate > 1% — NIST SI-4',
       metric: apiErrorRate,
@@ -93,22 +124,18 @@ export class ObservabilityStack extends cdk.Stack {
       treatMissingData: cloudwatch.TreatMissingData.BREACHING,
     }));
 
-    // API Lambda P99 duration > 10s
-    alarms.push(new cloudwatch.Alarm(this, 'ApiP99LatencyAlarm', {
+    addAlarm(new cloudwatch.Alarm(this, 'ApiP99LatencyAlarm', {
       alarmName: 'cloud-acceleration-api-p99-latency',
       alarmDescription: 'API Lambda P99 latency > 10s',
-      metric: props.apiFunction.metricDuration({
-        statistic: 'p99',
-        period: cdk.Duration.minutes(5),
-      }),
+      metric: props.apiFunction.metricDuration({ statistic: 'p99', period: cdk.Duration.minutes(5) }),
       threshold: 10000,
       evaluationPeriods: 3,
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     }));
 
-    // Authorizer failures > 10 in 5 min (potential brute force — NIST SI-4)
-    alarms.push(new cloudwatch.Alarm(this, 'AuthFailureAlarm', {
+    // Elevated auth failures may indicate a brute-force attempt — NIST SI-4
+    addAlarm(new cloudwatch.Alarm(this, 'AuthFailureAlarm', {
       alarmName: 'cloud-acceleration-auth-failures',
       alarmDescription: 'Elevated auth failures — possible brute force — NIST SI-4',
       metric: authFailureMetric,
@@ -118,36 +145,27 @@ export class ObservabilityStack extends cdk.Stack {
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     }));
 
-    // DynamoDB system errors (HTTP 500 responses from DynamoDB service)
-    alarms.push(new cloudwatch.Alarm(this, 'DynamoSystemErrorAlarm', {
+    addAlarm(new cloudwatch.Alarm(this, 'DynamoSystemErrorAlarm', {
       alarmName: 'cloud-acceleration-dynamo-system-errors',
       alarmDescription: 'DynamoDB system errors detected',
-      metric: props.table.metric('SystemErrors', {
-        statistic: 'Sum',
-        period: cdk.Duration.minutes(5),
-      }),
+      metric: props.table.metric('SystemErrors', { statistic: 'Sum', period: cdk.Duration.minutes(5) }),
       threshold: 1,
       evaluationPeriods: 1,
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     }));
 
-    // DynamoDB throttled requests (aggregate across all operations)
-    alarms.push(new cloudwatch.Alarm(this, 'DynamoThrottleAlarm', {
+    addAlarm(new cloudwatch.Alarm(this, 'DynamoThrottleAlarm', {
       alarmName: 'cloud-acceleration-dynamo-throttles',
       alarmDescription: 'DynamoDB throttled requests — capacity planning needed',
-      metric: props.table.metric('ThrottledRequests', {
-        statistic: 'Sum',
-        period: cdk.Duration.minutes(5),
-      }),
+      metric: props.table.metric('ThrottledRequests', { statistic: 'Sum', period: cdk.Duration.minutes(5) }),
       threshold: 10,
       evaluationPeriods: 2,
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     }));
 
-    // Prober availability < 100% (functional health failure)
-    alarms.push(new cloudwatch.Alarm(this, 'ProberAvailabilityAlarm', {
+    const proberAvailabilityAlarm = addAlarm(new cloudwatch.Alarm(this, 'ProberAvailabilityAlarm', {
       alarmName: 'cloud-acceleration-prober-availability',
       alarmDescription: 'Application functional health check failed — NIST SI-6',
       metric: new cloudwatch.Metric({
@@ -162,8 +180,7 @@ export class ObservabilityStack extends cdk.Stack {
       treatMissingData: cloudwatch.TreatMissingData.BREACHING,
     }));
 
-    // Prober latency > 5s (degraded functional health)
-    alarms.push(new cloudwatch.Alarm(this, 'ProberLatencyAlarm', {
+    addAlarm(new cloudwatch.Alarm(this, 'ProberLatencyAlarm', {
       alarmName: 'cloud-acceleration-prober-latency',
       alarmDescription: 'Functional health check latency elevated > 5s',
       metric: new cloudwatch.Metric({
@@ -178,36 +195,28 @@ export class ObservabilityStack extends cdk.Stack {
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     }));
 
-    // API Gateway 5XX error rate
-    alarms.push(new cloudwatch.Alarm(this, 'ApiGw5xxAlarm', {
+    addAlarm(new cloudwatch.Alarm(this, 'ApiGw5xxAlarm', {
       alarmName: 'cloud-acceleration-apigw-5xx',
       alarmDescription: 'API Gateway 5XX error rate elevated',
-      metric: props.restApi.metricServerError({
-        period: cdk.Duration.minutes(5),
-        statistic: 'Sum',
-      }),
+      metric: props.restApi.metricServerError({ period: cdk.Duration.minutes(5), statistic: 'Sum' }),
       threshold: 5,
       evaluationPeriods: 2,
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     }));
 
-    // API Gateway 4XX error rate (elevated 4XX may indicate auth attacks)
-    alarms.push(new cloudwatch.Alarm(this, 'ApiGw4xxAlarm', {
+    // Elevated 4XX may indicate auth attacks — NIST SI-4
+    addAlarm(new cloudwatch.Alarm(this, 'ApiGw4xxAlarm', {
       alarmName: 'cloud-acceleration-apigw-4xx',
       alarmDescription: 'API Gateway 4XX error rate elevated — potential security event',
-      metric: props.restApi.metricClientError({
-        period: cdk.Duration.minutes(5),
-        statistic: 'Sum',
-      }),
+      metric: props.restApi.metricClientError({ period: cdk.Duration.minutes(5), statistic: 'Sum' }),
       threshold: 100,
       evaluationPeriods: 2,
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     }));
 
-    // Lambda concurrency — throttles signal capacity issues
-    alarms.push(new cloudwatch.Alarm(this, 'ApiThrottleAlarm', {
+    addAlarm(new cloudwatch.Alarm(this, 'ApiThrottleAlarm', {
       alarmName: 'cloud-acceleration-api-throttles',
       alarmDescription: 'API Lambda throttles detected',
       metric: props.apiFunction.metricThrottles({ period: cdk.Duration.minutes(5) }),
@@ -217,18 +226,40 @@ export class ObservabilityStack extends cdk.Stack {
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     }));
 
-    // Wire all alarms to SNS → PagerDuty
-    for (const alarm of alarms) {
-      alarm.addAlarmAction(alarmAction);
-      alarm.addOkAction(alarmAction);
-    }
+    const nlbDimensions = { LoadBalancer: props.privateLinkStack.nlbFullName };
+    const nlbUnhealthyHosts = new cloudwatch.Metric({
+      namespace: 'AWS/NetworkELB',
+      metricName: 'UnHealthyHostCount',
+      dimensionsMap: nlbDimensions,
+      statistic: 'Maximum',
+      period: cdk.Duration.minutes(1),
+      label: 'Unhealthy Hosts',
+    });
 
-    // ─── CloudWatch Dashboard ──────────────────────────────────────────────────
+    addAlarm(new cloudwatch.Alarm(this, 'NlbUnhealthyHostsAlarm', {
+      alarmName: 'cloud-acceleration-nlb-unhealthy-hosts',
+      alarmDescription: 'PrivateLink NLB has unhealthy targets — consumer access may be degraded',
+      metric: nlbUnhealthyHosts,
+      threshold: 0,
+      evaluationPeriods: 2,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.BREACHING,
+    }));
 
+    return { alarms, proberAvailabilityAlarm, apiErrorRateAlarm };
+  }
+
+  private createDashboard(
+    props: ObservabilityStackProps,
+    alarms: cloudwatch.Alarm[],
+    authFailureMetric: cloudwatch.Metric,
+  ): void {
     const dashboard = new cloudwatch.Dashboard(this, 'MainDashboard', {
       dashboardName: 'CloudAcceleration-Operations',
       defaultInterval: cdk.Duration.hours(3),
     });
+
+    const nlbDimensions = { LoadBalancer: props.privateLinkStack.nlbFullName };
 
     dashboard.addWidgets(
       new cloudwatch.TextWidget({
@@ -238,17 +269,13 @@ export class ObservabilityStack extends cdk.Stack {
       }),
     );
 
-    // Row 1: API Health
+    // Row 1: API health
     dashboard.addWidgets(
       new cloudwatch.GraphWidget({
         title: 'API Invocations & Errors',
         width: 8,
-        left: [
-          props.apiFunction.metricInvocations({ period: cdk.Duration.minutes(1) }),
-        ],
-        right: [
-          props.apiFunction.metricErrors({ period: cdk.Duration.minutes(1) }),
-        ],
+        left: [props.apiFunction.metricInvocations({ period: cdk.Duration.minutes(1) })],
+        right: [props.apiFunction.metricErrors({ period: cdk.Duration.minutes(1) })],
         leftYAxis: { label: 'Invocations', showUnits: false },
         rightYAxis: { label: 'Errors', showUnits: false },
       }),
@@ -271,7 +298,7 @@ export class ObservabilityStack extends cdk.Stack {
       }),
     );
 
-    // Row 2: Auth & Security
+    // Row 2: Auth & security
     dashboard.addWidgets(
       new cloudwatch.GraphWidget({
         title: 'Auth Failures (NIST SI-4)',
@@ -281,9 +308,7 @@ export class ObservabilityStack extends cdk.Stack {
       new cloudwatch.GraphWidget({
         title: 'Authorizer Latency',
         width: 8,
-        left: [
-          props.authorizerFunction.metricDuration({ statistic: 'p95', period: cdk.Duration.minutes(5) }),
-        ],
+        left: [props.authorizerFunction.metricDuration({ statistic: 'p95', period: cdk.Duration.minutes(5) })],
       }),
       new cloudwatch.GraphWidget({
         title: 'Lambda Throttles',
@@ -300,12 +325,8 @@ export class ObservabilityStack extends cdk.Stack {
       new cloudwatch.GraphWidget({
         title: 'DynamoDB Read / Write Capacity Consumed',
         width: 8,
-        left: [
-          props.table.metricConsumedReadCapacityUnits({ period: cdk.Duration.minutes(1) }),
-        ],
-        right: [
-          props.table.metricConsumedWriteCapacityUnits({ period: cdk.Duration.minutes(1) }),
-        ],
+        left: [props.table.metricConsumedReadCapacityUnits({ period: cdk.Duration.minutes(1) })],
+        right: [props.table.metricConsumedWriteCapacityUnits({ period: cdk.Duration.minutes(1) })],
       }),
       new cloudwatch.GraphWidget({
         title: 'DynamoDB Latency',
@@ -326,102 +347,77 @@ export class ObservabilityStack extends cdk.Stack {
     );
 
     // Row 4: PrivateLink NLB health
-    const nlbDimensions = { LoadBalancer: props.privateLinkStack.nlbFullName };
-    const nlbHealthyHosts = new cloudwatch.Metric({
-      namespace: 'AWS/NetworkELB',
-      metricName: 'HealthyHostCount',
-      dimensionsMap: nlbDimensions,
-      statistic: 'Minimum',
-      period: cdk.Duration.minutes(1),
-      label: 'Healthy Hosts',
-    });
-    const nlbUnhealthyHosts = new cloudwatch.Metric({
-      namespace: 'AWS/NetworkELB',
-      metricName: 'UnHealthyHostCount',
-      dimensionsMap: nlbDimensions,
-      statistic: 'Maximum',
-      period: cdk.Duration.minutes(1),
-      label: 'Unhealthy Hosts',
-    });
-
-    const nlbUnhealthyAlarm = new cloudwatch.Alarm(this, 'NlbUnhealthyHostsAlarm', {
-      alarmName: 'cloud-acceleration-nlb-unhealthy-hosts',
-      alarmDescription: 'PrivateLink NLB has unhealthy targets — consumer access may be degraded',
-      metric: nlbUnhealthyHosts,
-      threshold: 0,
-      evaluationPeriods: 2,
-      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
-      treatMissingData: cloudwatch.TreatMissingData.BREACHING,
-    });
-    nlbUnhealthyAlarm.addAlarmAction(alarmAction);
-    nlbUnhealthyAlarm.addOkAction(alarmAction);
-    alarms.push(nlbUnhealthyAlarm);
-
     dashboard.addWidgets(
       new cloudwatch.GraphWidget({
         title: 'PrivateLink NLB — Healthy / Unhealthy Hosts',
         width: 8,
-        left: [nlbHealthyHosts],
-        right: [nlbUnhealthyHosts],
+        left: [new cloudwatch.Metric({
+          namespace: 'AWS/NetworkELB',
+          metricName: 'HealthyHostCount',
+          dimensionsMap: nlbDimensions,
+          statistic: 'Minimum',
+          period: cdk.Duration.minutes(1),
+          label: 'Healthy Hosts',
+        })],
+        right: [new cloudwatch.Metric({
+          namespace: 'AWS/NetworkELB',
+          metricName: 'UnHealthyHostCount',
+          dimensionsMap: nlbDimensions,
+          statistic: 'Maximum',
+          period: cdk.Duration.minutes(1),
+          label: 'Unhealthy Hosts',
+        })],
       }),
       new cloudwatch.GraphWidget({
         title: 'PrivateLink NLB — Active Flow Count',
         width: 8,
-        left: [
-          new cloudwatch.Metric({
-            namespace: 'AWS/NetworkELB',
-            metricName: 'ActiveFlowCount',
-            dimensionsMap: nlbDimensions,
-            statistic: 'Average',
-            period: cdk.Duration.minutes(1),
-            label: 'Active Flows',
-          }),
-        ],
+        left: [new cloudwatch.Metric({
+          namespace: 'AWS/NetworkELB',
+          metricName: 'ActiveFlowCount',
+          dimensionsMap: nlbDimensions,
+          statistic: 'Average',
+          period: cdk.Duration.minutes(1),
+          label: 'Active Flows',
+        })],
       }),
       new cloudwatch.GraphWidget({
         title: 'PrivateLink NLB — Processed Bytes',
         width: 8,
-        left: [
-          new cloudwatch.Metric({
-            namespace: 'AWS/NetworkELB',
-            metricName: 'ProcessedBytes',
-            dimensionsMap: nlbDimensions,
-            statistic: 'Sum',
-            period: cdk.Duration.minutes(1),
-            label: 'Bytes',
-          }),
-        ],
+        left: [new cloudwatch.Metric({
+          namespace: 'AWS/NetworkELB',
+          metricName: 'ProcessedBytes',
+          dimensionsMap: nlbDimensions,
+          statistic: 'Sum',
+          period: cdk.Duration.minutes(1),
+          label: 'Bytes',
+        })],
       }),
     );
 
-    // Row 5: Prober — functional uptime
+    // Row 5: Prober functional uptime
     dashboard.addWidgets(
       new cloudwatch.GraphWidget({
         title: 'Functional Availability (Prober)',
         width: 8,
-        left: [
-          new cloudwatch.Metric({
-            namespace: 'CloudAcceleration/Prober',
-            metricName: 'Availability',
-            statistic: 'Average',
-            period: cdk.Duration.minutes(1),
-            label: 'Availability',
-          }),
-        ],
+        left: [new cloudwatch.Metric({
+          namespace: 'CloudAcceleration/Prober',
+          metricName: 'Availability',
+          statistic: 'Average',
+          period: cdk.Duration.minutes(1),
+          label: 'Availability',
+        })],
         leftYAxis: { min: 0, max: 1 },
       }),
       new cloudwatch.GraphWidget({
         title: 'Functional Latency — End-to-End (Prober)',
         width: 8,
-        left: [
-          new cloudwatch.Metric({
-            namespace: 'CloudAcceleration/Prober',
-            metricName: 'FunctionalLatency',
-            statistic: 'p95',
-            period: cdk.Duration.minutes(5),
-            label: 'P95 Latency (ms)',
-          }),
-        ],
+        left: [new cloudwatch.Metric({
+          namespace: 'CloudAcceleration/Prober',
+          metricName: 'FunctionalLatency',
+          statistic: 'p95',
+          period: cdk.Duration.minutes(5),
+          label: 'P95 Latency (ms)',
+        })],
       }),
       new cloudwatch.AlarmStatusWidget({
         title: 'Active Alarms',
@@ -429,22 +425,5 @@ export class ObservabilityStack extends cdk.Stack {
         alarms,
       }),
     );
-
-    // SLO composite alarm — ANY critical alarm triggers PagerDuty P1
-    new cloudwatch.CompositeAlarm(this, 'CriticalSloAlarm', {
-      compositeAlarmName: 'cloud-acceleration-slo-critical',
-      alarmDescription: 'P1: Critical SLO breach — immediate response required',
-      alarmRule: cloudwatch.AlarmRule.anyOf(
-        ...alarms.filter(a =>
-          ['cloud-acceleration-prober-availability', 'cloud-acceleration-api-error-rate'].some(n =>
-            (a.node.id).toLowerCase().includes(n.split('-').slice(-2).join(''))
-          )
-        ).map(a => cloudwatch.AlarmRule.fromAlarm(a, cloudwatch.AlarmState.ALARM))
-      ),
-    });
-
-    new cdk.CfnOutput(this, 'DashboardUrl', {
-      value: `https://${this.region}.console.aws.amazon.com/cloudwatch/home#dashboards:name=CloudAcceleration-Operations`,
-    });
   }
 }

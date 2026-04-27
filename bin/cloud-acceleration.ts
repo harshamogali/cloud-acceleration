@@ -75,6 +75,8 @@ new ObservabilityStack(app, 'CloudAccelObservability', {
   alarmTopic: alerting.alarmTopic,
   restApi: api.restApi,
   privateLinkStack: privateLink,
+  authorizerLogGroup: authorizer.logGroup,
+  proberLogGroup: prober.logGroup,
 });
 
 app.synth();

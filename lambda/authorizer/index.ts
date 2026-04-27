@@ -11,11 +11,14 @@ const sm = new SecretsManagerClient({});
 const cw = new CloudWatchClient({});
 
 let cachedSecret: string | undefined;
+let cacheExpiresAt = 0;
+const CACHE_TTL_MS = 5 * 60 * 1000;
 
 async function getSigningKey(): Promise<string> {
-  if (cachedSecret) return cachedSecret;
+  if (cachedSecret && Date.now() < cacheExpiresAt) return cachedSecret;
   const res = await sm.send(new GetSecretValueCommand({ SecretId: process.env.JWT_SECRET_ARN! }));
   cachedSecret = res.SecretString!;
+  cacheExpiresAt = Date.now() + CACHE_TTL_MS;
   return cachedSecret;
 }
 

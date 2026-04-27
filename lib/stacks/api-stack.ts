@@ -81,7 +81,6 @@ export class ApiStack extends cdk.Stack {
         throttlingBurstLimit: 500,
         throttlingRateLimit: 1000,
       },
-      defaultCorsPreflightOptions: undefined,
     });
 
     // IAM role that API Gateway assumes to invoke the authorizer Lambda.

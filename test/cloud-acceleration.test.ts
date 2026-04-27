@@ -1,17 +1,14 @@
-// import * as cdk from 'aws-cdk-lib/core';
-// import { Template } from 'aws-cdk-lib/assertions';
-// import * as CloudAcceleration from '../lib/cloud-acceleration-stack';
+// Top-level smoke test — verifies the CDK app synthesises without errors.
+// Detailed stack assertions live in test/stacks/*.test.ts
+import * as cdk from 'aws-cdk-lib';
+import { KmsStack } from '../lib/stacks/kms-stack';
+import { Template } from 'aws-cdk-lib/assertions';
 
-// example test. To run these tests, uncomment this file along with the
-// example resource in lib/cloud-acceleration-stack.ts
-test('SQS Queue Created', () => {
-//   const app = new cdk.App();
-//     // WHEN
-//   const stack = new CloudAcceleration.CloudAccelerationStack(app, 'MyTestStack');
-//     // THEN
-//   const template = Template.fromStack(stack);
-
-//   template.hasResourceProperties('AWS::SQS::Queue', {
-//     VisibilityTimeout: 300
-//   });
+test('KmsStack synthesises', () => {
+  const app = new cdk.App();
+  const stack = new KmsStack(app, 'SmokeKms', {
+    env: { account: '123456789012', region: 'us-east-1' },
+  });
+  const template = Template.fromStack(stack);
+  template.resourceCountIs('AWS::KMS::Key', 1);
 });

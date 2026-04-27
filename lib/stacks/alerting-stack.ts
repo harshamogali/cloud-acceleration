@@ -3,10 +3,13 @@ import * as sns from 'aws-cdk-lib/aws-sns';
 import * as subscriptions from 'aws-cdk-lib/aws-sns-subscriptions';
 import * as kms from 'aws-cdk-lib/aws-kms';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
-import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
 import { Construct } from 'constructs';
+import * as path from 'path';
+import { LOG_RETENTION, LAMBDA_RUNTIME, LAMBDA_ARCH, LAMBDA_INSIGHTS } from '../constants';
 
 interface AlertingStackProps extends cdk.StackProps {
   kmsKey: kms.Key;
@@ -41,112 +44,53 @@ export class AlertingStack extends cdk.Stack {
       displayName: 'Cloud Acceleration PagerDuty',
     });
 
-    // Log group for PagerDuty bridge Lambda
     const pdLogGroup = new logs.LogGroup(this, 'PagerDutyBridgeLogs', {
       logGroupName: '/cloud-acceleration/pagerduty-bridge',
-      retention: logs.RetentionDays.ONE_YEAR,
+      retention: LOG_RETENTION,
       encryptionKey: props.kmsKey,
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
-    // Lambda execution role with least privilege — NIST AC-6
+    // Least-privilege execution role — NIST AC-6
     const pdRole = new iam.Role(this, 'PagerDutyBridgeRole', {
       assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
-      description: 'Execution role for PagerDuty bridge Lambda',
-      managedPolicies: [
-        iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaVPCAccessExecutionRole'),
-      ],
     });
-
     pdRole.addToPolicy(new iam.PolicyStatement({
       actions: ['logs:CreateLogStream', 'logs:PutLogEvents'],
       resources: [pdLogGroup.logGroupArn],
     }));
-
     pdRole.addToPolicy(new iam.PolicyStatement({
       actions: ['secretsmanager:GetSecretValue'],
       resources: [pagerDutySecret.secretArn],
     }));
-
     pdRole.addToPolicy(new iam.PolicyStatement({
       actions: ['kms:Decrypt', 'kms:GenerateDataKey'],
       resources: [props.kmsKey.keyArn],
     }));
 
-    // PagerDuty bridge Lambda — forwards SNS alarms to PagerDuty Events API v2
-    // NOTE: This Lambda runs WITHOUT VPC access to reach PagerDuty's HTTPS endpoint.
-    // In a fully air-gapped environment, replace with an outbound proxy or HTTPS VPC endpoint.
-    const pdBridgeFunction = new lambda.Function(this, 'PagerDutyBridge', {
+    // PagerDuty bridge — forwards SNS alarm notifications to PagerDuty Events API v2.
+    // Intentionally NOT placed inside the VPC: it must reach events.pagerduty.com outbound.
+    const pdBridgeFunction = new NodejsFunction(this, 'PagerDutyBridge', {
       functionName: 'cloud-acceleration-pagerduty-bridge',
-      runtime: lambda.Runtime.NODEJS_22_X,
-      handler: 'index.handler',
-      code: lambda.Code.fromInline(`
-const https = require('https');
-const { SecretsManagerClient, GetSecretValueCommand } = require('@aws-sdk/client-secrets-manager');
-
-const sm = new SecretsManagerClient();
-let cachedKey;
-
-async function getIntegrationKey() {
-  if (cachedKey) return cachedKey;
-  const res = await sm.send(new GetSecretValueCommand({
-    SecretId: process.env.PD_SECRET_ARN,
-  }));
-  cachedKey = res.SecretString;
-  return cachedKey;
-}
-
-exports.handler = async (event) => {
-  const integrationKey = await getIntegrationKey();
-  for (const record of event.Records) {
-    const snsMessage = JSON.parse(record.Sns.Message);
-    const payload = {
-      routing_key: integrationKey,
-      event_action: snsMessage.NewStateValue === 'ALARM' ? 'trigger' : 'resolve',
-      dedup_key: snsMessage.AlarmName,
-      payload: {
-        summary: snsMessage.AlarmDescription || snsMessage.AlarmName,
-        severity: 'critical',
-        source: snsMessage.AlarmArn,
-        custom_details: {
-          alarm_name: snsMessage.AlarmName,
-          state: snsMessage.NewStateValue,
-          reason: snsMessage.NewStateReason,
-          region: snsMessage.Region,
-          account: snsMessage.AWSAccountId,
-        },
-      },
-    };
-
-    await new Promise((resolve, reject) => {
-      const body = JSON.stringify(payload);
-      const req = https.request({
-        hostname: 'events.pagerduty.com',
-        path: '/v2/enqueue',
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-      }, (res) => {
-        res.resume();
-        res.on('end', resolve);
-      });
-      req.on('error', reject);
-      req.write(body);
-      req.end();
-    });
-  }
-};
-      `),
+      runtime: LAMBDA_RUNTIME,
+      entry: path.join(__dirname, '../../lambda/pagerduty-bridge/index.ts'),
       role: pdRole,
+      logGroup: pdLogGroup,
       timeout: cdk.Duration.seconds(30),
+      architecture: LAMBDA_ARCH,
+      insightsVersion: LAMBDA_INSIGHTS,
+      tracing: lambda.Tracing.ACTIVE,
       environment: {
         PD_SECRET_ARN: pagerDutySecret.secretArn,
         NODE_OPTIONS: '--enable-source-maps',
       },
-      logGroup: pdLogGroup,
-      tracing: lambda.Tracing.ACTIVE,
+      bundling: {
+        minify: true,
+        sourceMap: true,
+        externalModules: ['@aws-sdk/*'],
+      },
     });
 
-    // Wire the alarm topic → PagerDuty bridge
     this.alarmTopic.addSubscription(new subscriptions.LambdaSubscription(pdBridgeFunction));
 
     new cdk.CfnOutput(this, 'AlarmTopicArn', { value: this.alarmTopic.topicArn });
