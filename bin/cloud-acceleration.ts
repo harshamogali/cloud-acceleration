@@ -6,6 +6,7 @@ import { DataStack } from '../lib/stacks/data-stack';
 import { ApiStack } from '../lib/stacks/api-stack';
 import { ObservabilityStack } from '../lib/stacks/observability-stack';
 import { AlertingStack } from '../lib/stacks/alerting-stack';
+import { PrivateLinkStack } from '../lib/stacks/privatelink-stack';
 
 const app = new cdk.App();
 
@@ -46,6 +47,15 @@ const api = new ApiStack(app, 'CloudAccelApi', {
   vpcEndpointId: networking.apiGwVpcEndpoint.vpcEndpointId,
 });
 
+const privateLink = new PrivateLinkStack(app, 'CloudAccelPrivateLink', {
+  env,
+  tags,
+  vpc: networking.vpc,
+  kmsKey: networking.kmsKey,
+  apiGwVpcEndpoint: networking.apiGwVpcEndpoint,
+  // allowedConsumerPrincipals: [new iam.ArnPrincipal('arn:aws:iam::CONSUMER_ACCOUNT_ID:root')],
+});
+
 new ObservabilityStack(app, 'CloudAccelObservability', {
   env,
   tags,
@@ -57,6 +67,7 @@ new ObservabilityStack(app, 'CloudAccelObservability', {
   proberFunction: api.proberFunction,
   alarmTopic: alerting.alarmTopic,
   restApi: api.restApi,
+  privateLinkStack: privateLink,
 });
 
 app.synth();

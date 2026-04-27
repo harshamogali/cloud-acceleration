@@ -8,6 +8,7 @@ import * as kms from 'aws-cdk-lib/aws-kms';
 import * as sns from 'aws-cdk-lib/aws-sns';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as apigateway from 'aws-cdk-lib/aws-apigateway';
+import { PrivateLinkStack } from './privatelink-stack';
 import { Construct } from 'constructs';
 
 interface ObservabilityStackProps extends cdk.StackProps {
@@ -19,6 +20,7 @@ interface ObservabilityStackProps extends cdk.StackProps {
   proberFunction: lambda.Function;
   alarmTopic: sns.Topic;
   restApi: apigateway.RestApi;
+  privateLinkStack: PrivateLinkStack;
 }
 
 export class ObservabilityStack extends cdk.Stack {
@@ -323,7 +325,76 @@ export class ObservabilityStack extends cdk.Stack {
       }),
     );
 
-    // Row 4: Prober — functional uptime
+    // Row 4: PrivateLink NLB health
+    const nlbDimensions = { LoadBalancer: props.privateLinkStack.nlbFullName };
+    const nlbHealthyHosts = new cloudwatch.Metric({
+      namespace: 'AWS/NetworkELB',
+      metricName: 'HealthyHostCount',
+      dimensionsMap: nlbDimensions,
+      statistic: 'Minimum',
+      period: cdk.Duration.minutes(1),
+      label: 'Healthy Hosts',
+    });
+    const nlbUnhealthyHosts = new cloudwatch.Metric({
+      namespace: 'AWS/NetworkELB',
+      metricName: 'UnHealthyHostCount',
+      dimensionsMap: nlbDimensions,
+      statistic: 'Maximum',
+      period: cdk.Duration.minutes(1),
+      label: 'Unhealthy Hosts',
+    });
+
+    const nlbUnhealthyAlarm = new cloudwatch.Alarm(this, 'NlbUnhealthyHostsAlarm', {
+      alarmName: 'cloud-acceleration-nlb-unhealthy-hosts',
+      alarmDescription: 'PrivateLink NLB has unhealthy targets — consumer access may be degraded',
+      metric: nlbUnhealthyHosts,
+      threshold: 0,
+      evaluationPeriods: 2,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.BREACHING,
+    });
+    nlbUnhealthyAlarm.addAlarmAction(alarmAction);
+    nlbUnhealthyAlarm.addOkAction(alarmAction);
+    alarms.push(nlbUnhealthyAlarm);
+
+    dashboard.addWidgets(
+      new cloudwatch.GraphWidget({
+        title: 'PrivateLink NLB — Healthy / Unhealthy Hosts',
+        width: 8,
+        left: [nlbHealthyHosts],
+        right: [nlbUnhealthyHosts],
+      }),
+      new cloudwatch.GraphWidget({
+        title: 'PrivateLink NLB — Active Flow Count',
+        width: 8,
+        left: [
+          new cloudwatch.Metric({
+            namespace: 'AWS/NetworkELB',
+            metricName: 'ActiveFlowCount',
+            dimensionsMap: nlbDimensions,
+            statistic: 'Average',
+            period: cdk.Duration.minutes(1),
+            label: 'Active Flows',
+          }),
+        ],
+      }),
+      new cloudwatch.GraphWidget({
+        title: 'PrivateLink NLB — Processed Bytes',
+        width: 8,
+        left: [
+          new cloudwatch.Metric({
+            namespace: 'AWS/NetworkELB',
+            metricName: 'ProcessedBytes',
+            dimensionsMap: nlbDimensions,
+            statistic: 'Sum',
+            period: cdk.Duration.minutes(1),
+            label: 'Bytes',
+          }),
+        ],
+      }),
+    );
+
+    // Row 5: Prober — functional uptime
     dashboard.addWidgets(
       new cloudwatch.GraphWidget({
         title: 'Functional Availability (Prober)',
