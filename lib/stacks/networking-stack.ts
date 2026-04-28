@@ -49,7 +49,10 @@ export class NetworkingStack extends cdk.Stack {
       logGroupName: '/cloud-acceleration/vpc-flow-logs',
       retention: LOG_RETENTION,
       encryptionKey: props.kmsKey,
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      // DESTROY (not RETAIN): the 1-year `retention` setting handles audit
+      // retention. RETAIN on a named log group blocks stack re-creation after
+      // a rollback because the log group survives the failed stack.
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
     new ec2.FlowLog(this, 'FlowLog', {

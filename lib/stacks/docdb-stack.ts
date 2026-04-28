@@ -128,7 +128,8 @@ export class DocDbStack extends cdk.Stack {
       logGroupName: '/aws/docdb/cloud-acceleration-docdb/ops',
       retention: LOG_RETENTION,
       encryptionKey: props.kmsKey,
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      // DESTROY: see networking-stack.ts for rationale.
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
     // AWS Backup vault — provides immutable, cross-account-portable backups

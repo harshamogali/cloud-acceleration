@@ -48,7 +48,8 @@ export class AlertingStack extends cdk.Stack {
       logGroupName: '/cloud-acceleration/pagerduty-bridge',
       retention: LOG_RETENTION,
       encryptionKey: props.kmsKey,
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      // DESTROY: see networking-stack.ts for rationale.
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
     // Least-privilege execution role — NIST AC-6

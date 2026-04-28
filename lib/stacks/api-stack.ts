@@ -26,7 +26,8 @@ export class ApiStack extends cdk.Stack {
       logGroupName: '/cloud-acceleration/apigw-access',
       retention: logs.RetentionDays.ONE_YEAR,
       encryptionKey: props.kmsKey,
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      // DESTROY: see networking-stack.ts for rationale.
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
     // Private API — only reachable via VPC endpoint (NIST SC-7, AC-17)

@@ -62,7 +62,9 @@ export class VpcLambdaFunction extends Construct {
       logGroupName: props.logGroupName,
       retention: LOG_RETENTION,
       encryptionKey: props.kmsKey,
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      // DESTROY: the 1-year retention setting handles audit retention.
+      // RETAIN on a named log group blocks stack re-creation after rollback.
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
     this.role = new iam.Role(this, 'Role', {
