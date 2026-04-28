@@ -774,6 +774,25 @@ Check what will change before deploying:
 cdk diff --all
 ```
 
+### Synthetic traffic against the private API
+
+The API Gateway is private — `curl` from your laptop will hang. To exercise the deployed stack end-to-end without standing up a bastion host or PrivateLink consumer, invoke the CRUD Lambda directly with synthetic API Gateway events. The Lambda runs inside the VPC and connects to DocumentDB over TLS, so this drives real cluster traffic and produces the same `CloudAcceleration/DocDb` custom metrics as production calls.
+
+```bash
+# Default: 50 documents, full CRUD walkthrough (create, list, get, update, delete)
+node scripts/generate-docdb-traffic.mjs
+
+# Custom volume
+node scripts/generate-docdb-traffic.mjs 200
+
+# Custom principal (documents are scoped per principal)
+PRINCIPAL=user-42 node scripts/generate-docdb-traffic.mjs 100
+```
+
+The script reports per-operation p50/p95/p99 latency and surfaces the first 3 failures verbatim. Cold-start dominates the first invocation (~2 s); steady-state hovers at p50 ~80 ms for reads and writes. Documents created during a run remain in the cluster under the script's `ownerId`; re-running grows the dataset.
+
+This bypasses API Gateway itself but exercises every other layer (Lambda execution role → Secrets Manager fetch → mongodb driver → TLS handshake → DocumentDB writer/reader endpoints). For a true end-to-end test through API Gateway, run the same script from an EC2 instance inside the VPC (substituting `curl` for `aws lambda invoke` and adding the JWT header).
+
 ---
 
 ## Project Structure
