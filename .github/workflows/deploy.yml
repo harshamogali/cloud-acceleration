@@ -1,0 +1,57 @@
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      AWS_REGION: us-east-1
+      CDK_DEFAULT_ACCOUNT: '607266523002'
+      CDK_DEFAULT_REGION: us-east-1
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Type-check
+        run: npx tsc --noEmit
+
+      - name: Unit tests
+        run: npx jest
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::607266523002:role/GitHubActionsCdkDeploy
+          role-session-name: gha-cdk-deploy-${{ github.run_id }}
+          aws-region: us-east-1
+
+      - name: CDK synth
+        run: npx cdk synth --quiet
+
+      - name: CDK deploy
+        run: npx cdk deploy --all --require-approval never --outputs-file cdk-outputs.json
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cdk-outputs
+          path: cdk-outputs.json
+          if-no-files-found: ignore
