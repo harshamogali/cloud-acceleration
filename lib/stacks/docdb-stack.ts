@@ -56,34 +56,22 @@ export class DocDbStack extends cdk.Stack {
       },
     });
 
-    // Credentials managed by Secrets Manager with KMS-CMK encryption and
-    // automatic rotation — NIST IA-5.
-    const masterUserSecret = new secretsmanager.Secret(this, 'MasterUserSecret', {
-      secretName: '/cloud-acceleration/docdb/master',
-      description: 'DocumentDB master user credentials',
-      encryptionKey: props.kmsKey,
-      generateSecretString: {
-        secretStringTemplate: JSON.stringify({ username: 'docdbadmin' }),
-        generateStringKey: 'password',
-        excludeCharacters: '"@/\\\'',
-        passwordLength: 32,
-      },
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
-    });
-
-    this.credentialsSecret = masterUserSecret;
-
     // DocumentDB cluster.
     // - 3 instances spread across 3 AZs (1 writer + 2 readers)
     // - Storage encrypted with the platform CMK (SC-28)
     // - Backups retained 35 days, daily snapshot window 02:00-03:00 UTC
     // - Audit + profiler logs exported to CloudWatch (AU-12)
     // - Deletion protection on; final snapshot taken on stack delete
+    //
+    // Master credentials: the cluster's `masterUser.password` is intentionally
+    // omitted so CDK auto-generates a random password and stores it in
+    // Secrets Manager (encrypted with the platform CMK). The password value
+    // never appears in source, the synthesized template, or CFN parameters --
+    // only token references resolve to it at deploy time. NIST IA-5.
     this.cluster = new docdb.DatabaseCluster(this, 'Cluster', {
       dbClusterName: 'cloud-acceleration-docdb',
       masterUser: {
         username: 'docdbadmin',
-        password: masterUserSecret.secretValueFromJson('password'),
         excludeCharacters: '"@/\\\'',
       },
       instanceType: ec2.InstanceType.of(ec2.InstanceClass.R6G, ec2.InstanceSize.LARGE),
@@ -106,6 +94,18 @@ export class DocDbStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.RETAIN,
       copyTagsToSnapshot: true,
     });
+
+    // Capture the auto-generated secret as the public credentials handle.
+    // `cluster.secret` is populated by CDK because we omitted masterUser.password.
+    if (!this.cluster.secret) {
+      throw new Error('Expected cluster.secret to be auto-generated');
+    }
+    this.credentialsSecret = this.cluster.secret;
+
+    // Automatic rotation every 30 days - NIST IA-5 (authenticator management).
+    // Deploys the AWS-published Mongo single-user rotation Lambda (SAR app)
+    // into the cluster's VPC. The cluster's SG ingress is wired automatically.
+    this.cluster.addRotationSingleUser(cdk.Duration.days(30));
 
     // Enable Performance Insights / DB Insights on every instance — NIST AU-12.
     // The L2 construct does not surface this flag; toggle it on the underlying
@@ -206,6 +206,6 @@ export class DocDbStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'ClusterEndpoint', { value: this.cluster.clusterEndpoint.hostname });
     new cdk.CfnOutput(this, 'ClusterReadEndpoint', { value: this.cluster.clusterReadEndpoint.hostname });
     new cdk.CfnOutput(this, 'ClusterPort', { value: cdk.Token.asString(this.cluster.clusterEndpoint.port) });
-    new cdk.CfnOutput(this, 'CredentialsSecretArn', { value: masterUserSecret.secretArn });
+    new cdk.CfnOutput(this, 'CredentialsSecretArn', { value: this.credentialsSecret.secretArn });
   }
 }
