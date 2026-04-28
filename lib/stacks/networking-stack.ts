@@ -61,7 +61,7 @@ export class NetworkingStack extends cdk.Stack {
     // Security group for VPC endpoints — accepts HTTPS from within the VPC
     const endpointSg = new ec2.SecurityGroup(this, 'EndpointSg', {
       vpc: this.vpc,
-      description: 'VPC Interface Endpoints — HTTPS ingress from VPC CIDR only',
+      description: 'VPC Interface Endpoints - HTTPS ingress from VPC CIDR only',
       allowAllOutbound: false,
     });
     endpointSg.addIngressRule(ec2.Peer.ipv4(this.vpc.vpcCidrBlock), ec2.Port.tcp(443), 'HTTPS from VPC');

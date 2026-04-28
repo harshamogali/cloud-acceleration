@@ -38,7 +38,7 @@ export class DocDbStack extends cdk.Stack {
     // initiate outbound traffic).
     this.clusterSecurityGroup = new ec2.SecurityGroup(this, 'ClusterSg', {
       vpc: props.vpc,
-      description: 'DocumentDB cluster — ingress on 27017 from app Lambdas only',
+      description: 'DocumentDB cluster - ingress on 27017 from app Lambdas only',
       allowAllOutbound: false,
     });
 

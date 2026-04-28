@@ -49,7 +49,7 @@ export class VpcLambdaFunction extends Construct {
 
     const sg = new ec2.SecurityGroup(this, 'Sg', {
       vpc: props.vpc,
-      description: `${props.functionName} — outbound HTTPS to VPC endpoints only`,
+      description: `${props.functionName} - outbound HTTPS to VPC endpoints only`,
       allowAllOutbound: false,
     });
     sg.addEgressRule(

@@ -86,7 +86,7 @@ export class DocDbApiHandlerStack extends cdk.Stack {
     importedClusterSg.addIngressRule(
       lambdaSg,
       ec2.Port.tcp(props.cluster.clusterEndpoint.port),
-      'CRUD Lambda → DocumentDB',
+      'CRUD Lambda to DocumentDB',
     );
     // The Lambda's egress rule (HTTPS to VPC CIDR) was set by VpcLambdaFunction,
     // but DocumentDB listens on 27017, not 443 — add it explicitly.

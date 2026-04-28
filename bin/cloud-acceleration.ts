@@ -83,7 +83,7 @@ const privateLink = new PrivateLinkStack(app, 'CloudAccelPrivateLink', {
   // allowedConsumerPrincipals: [new iam.ArnPrincipal('arn:aws:iam::CONSUMER_ACCOUNT_ID:root')],
 });
 
-new ObservabilityStack(app, 'CloudAccelObservability', {
+const observability = new ObservabilityStack(app, 'CloudAccelObservability', {
   env, tags, vpc: networking.vpc, kmsKey: kms.key,
   table: data.table,
   apiFunction: apiHandler.apiFunction,
@@ -97,5 +97,27 @@ new ObservabilityStack(app, 'CloudAccelObservability', {
   docDbApiFunction: docDbApiHandler.apiFunction,
   docDbClusterIdentifier: docdb.cluster.clusterIdentifier,
 });
+
+// Cross-stack references already create implicit dependencies via Fn::ImportValue,
+// but we declare them explicitly so the deploy order is self-documenting and
+// stable even if a stack stops referencing another's outputs.
+networking.addDependency(kms);
+data.addDependency(networking);
+docdb.addDependency(networking);
+alerting.addDependency(kms);
+authorizer.addDependency(networking);
+apiHandler.addDependency(data);
+docDbApiHandler.addDependency(docdb);
+prober.addDependency(apiHandler);
+api.addDependency(authorizer);
+api.addDependency(apiHandler);
+api.addDependency(docDbApiHandler);
+privateLink.addDependency(networking);
+observability.addDependency(api);
+observability.addDependency(prober);
+observability.addDependency(privateLink);
+observability.addDependency(alerting);
+observability.addDependency(docDbApiHandler);
+observability.addDependency(docdb);
 
 app.synth();
