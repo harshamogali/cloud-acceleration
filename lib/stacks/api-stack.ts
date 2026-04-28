@@ -13,6 +13,7 @@ interface ApiStackProps extends cdk.StackProps {
   vpcEndpointId: string;
   authorizerFunction: lambda.Function;
   apiFunction: lambda.Function;
+  docDbApiFunction?: lambda.Function;
 }
 
 export class ApiStack extends cdk.Stack {
@@ -132,6 +133,29 @@ export class ApiStack extends cdk.Stack {
     itemResource.addMethod('GET', apiIntegration, methodOptions);
     itemResource.addMethod('PUT', apiIntegration, methodOptions);
     itemResource.addMethod('DELETE', apiIntegration, methodOptions);
+
+    // /documents — DocumentDB-backed CRUD
+    if (props.docDbApiFunction) {
+      const docDbIntegration = new apigateway.LambdaIntegration(props.docDbApiFunction, {
+        proxy: true,
+        allowTestInvoke: false,
+      });
+
+      const documentsResource = this.restApi.root.addResource('documents');
+      documentsResource.addMethod('GET', docDbIntegration, methodOptions);
+      documentsResource.addMethod('POST', docDbIntegration, methodOptions);
+
+      // Internal health probe — no auth (matches /health pattern)
+      const documentsHealth = documentsResource.addResource('health');
+      documentsHealth.addMethod('GET', docDbIntegration, {
+        authorizationType: apigateway.AuthorizationType.NONE,
+      });
+
+      const documentResource = documentsResource.addResource('{id}');
+      documentResource.addMethod('GET', docDbIntegration, methodOptions);
+      documentResource.addMethod('PUT', docDbIntegration, methodOptions);
+      documentResource.addMethod('DELETE', docDbIntegration, methodOptions);
+    }
 
     new cdk.CfnOutput(this, 'ApiEndpoint', { value: this.restApi.url });
   }

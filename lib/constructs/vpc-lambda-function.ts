@@ -4,7 +4,7 @@ import * as kms from 'aws-cdk-lib/aws-kms';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
-import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
+import { NodejsFunction, ICommandHooks } from 'aws-cdk-lib/aws-lambda-nodejs';
 import { Construct } from 'constructs';
 import {
   LOG_RETENTION,
@@ -28,6 +28,10 @@ export interface VpcLambdaFunctionProps {
   environment?: Record<string, string>;
   /** Additional IAM policy statements granted to the execution role. */
   extraPolicies?: iam.PolicyStatement[];
+  /** Non-AWS-SDK npm packages to install into the bundle (skips esbuild for these). */
+  bundlingNodeModules?: string[];
+  /** esbuild command hooks — used to copy non-imported assets (e.g. TLS CA bundles). */
+  bundlingCommandHooks?: ICommandHooks;
 }
 
 /**
@@ -105,6 +109,8 @@ export class VpcLambdaFunction extends Construct {
         minify: true,
         sourceMap: true,
         externalModules: ['@aws-sdk/*'],
+        nodeModules: props.bundlingNodeModules,
+        commandHooks: props.bundlingCommandHooks,
       },
     });
   }

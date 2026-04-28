@@ -23,6 +23,8 @@ interface ObservabilityStackProps extends cdk.StackProps {
   privateLinkStack: PrivateLinkStack;
   authorizerLogGroup: logs.ILogGroup;
   proberLogGroup: logs.ILogGroup;
+  docDbApiFunction?: lambda.Function;
+  docDbClusterIdentifier?: string;
 }
 
 interface MetricFilters {
@@ -246,6 +248,80 @@ export class ObservabilityStack extends cdk.Stack {
       treatMissingData: cloudwatch.TreatMissingData.BREACHING,
     }));
 
+    if (props.docDbApiFunction) {
+      const docDbErrorRate = new cloudwatch.MathExpression({
+        expression: '(errors / invocations) * 100',
+        usingMetrics: {
+          errors: props.docDbApiFunction.metricErrors({ period: cdk.Duration.minutes(5) }),
+          invocations: props.docDbApiFunction.metricInvocations({ period: cdk.Duration.minutes(5) }),
+        },
+        label: 'DocDB API Error Rate %',
+        period: cdk.Duration.minutes(5),
+      });
+
+      addAlarm(new cloudwatch.Alarm(this, 'DocDbApiErrorRateAlarm', {
+        alarmName: 'cloud-acceleration-docdb-api-error-rate',
+        alarmDescription: 'DocumentDB CRUD Lambda error rate > 1% — NIST SI-4',
+        metric: docDbErrorRate,
+        threshold: 1,
+        evaluationPeriods: 2,
+        comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      }));
+    }
+
+    if (props.docDbClusterIdentifier) {
+      const docDbDimensions = { DBClusterIdentifier: props.docDbClusterIdentifier };
+
+      addAlarm(new cloudwatch.Alarm(this, 'DocDbCpuAlarm', {
+        alarmName: 'cloud-acceleration-docdb-cpu',
+        alarmDescription: 'DocumentDB CPU > 80% — possible capacity bottleneck',
+        metric: new cloudwatch.Metric({
+          namespace: 'AWS/DocDB',
+          metricName: 'CPUUtilization',
+          dimensionsMap: docDbDimensions,
+          statistic: 'Average',
+          period: cdk.Duration.minutes(5),
+        }),
+        threshold: 80,
+        evaluationPeriods: 3,
+        comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      }));
+
+      addAlarm(new cloudwatch.Alarm(this, 'DocDbReplicaLagAlarm', {
+        alarmName: 'cloud-acceleration-docdb-replica-lag',
+        alarmDescription: 'DocumentDB replica lag > 1s',
+        metric: new cloudwatch.Metric({
+          namespace: 'AWS/DocDB',
+          metricName: 'DBInstanceReplicaLag',
+          dimensionsMap: docDbDimensions,
+          statistic: 'Maximum',
+          period: cdk.Duration.minutes(5),
+        }),
+        threshold: 1000,
+        evaluationPeriods: 3,
+        comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      }));
+
+      addAlarm(new cloudwatch.Alarm(this, 'DocDbConnectionsAlarm', {
+        alarmName: 'cloud-acceleration-docdb-connections',
+        alarmDescription: 'DocumentDB connection count elevated > 1000',
+        metric: new cloudwatch.Metric({
+          namespace: 'AWS/DocDB',
+          metricName: 'DatabaseConnections',
+          dimensionsMap: docDbDimensions,
+          statistic: 'Sum',
+          period: cdk.Duration.minutes(5),
+        }),
+        threshold: 1000,
+        evaluationPeriods: 2,
+        comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      }));
+    }
+
     return { alarms, proberAvailabilityAlarm, apiErrorRateAlarm };
   }
 
@@ -393,6 +469,42 @@ export class ObservabilityStack extends cdk.Stack {
         })],
       }),
     );
+
+    // Row 4b: DocumentDB
+    if (props.docDbClusterIdentifier && props.docDbApiFunction) {
+      const docDbDimensions = { DBClusterIdentifier: props.docDbClusterIdentifier };
+      dashboard.addWidgets(
+        new cloudwatch.GraphWidget({
+          title: 'DocumentDB CPU / Connections',
+          width: 8,
+          left: [new cloudwatch.Metric({
+            namespace: 'AWS/DocDB', metricName: 'CPUUtilization',
+            dimensionsMap: docDbDimensions, statistic: 'Average',
+            period: cdk.Duration.minutes(1), label: 'CPU %',
+          })],
+          right: [new cloudwatch.Metric({
+            namespace: 'AWS/DocDB', metricName: 'DatabaseConnections',
+            dimensionsMap: docDbDimensions, statistic: 'Sum',
+            period: cdk.Duration.minutes(1), label: 'Connections',
+          })],
+        }),
+        new cloudwatch.GraphWidget({
+          title: 'DocumentDB Replica Lag (ms)',
+          width: 8,
+          left: [new cloudwatch.Metric({
+            namespace: 'AWS/DocDB', metricName: 'DBInstanceReplicaLag',
+            dimensionsMap: docDbDimensions, statistic: 'Maximum',
+            period: cdk.Duration.minutes(1), label: 'Max Replica Lag',
+          })],
+        }),
+        new cloudwatch.GraphWidget({
+          title: 'DocDB CRUD Lambda — Latency / Errors',
+          width: 8,
+          left: [props.docDbApiFunction.metricDuration({ statistic: 'p95', period: cdk.Duration.minutes(5), label: 'P95 ms' })],
+          right: [props.docDbApiFunction.metricErrors({ period: cdk.Duration.minutes(5), label: 'Errors' })],
+        }),
+      );
+    }
 
     // Row 5: Prober functional uptime
     dashboard.addWidgets(

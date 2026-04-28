@@ -4,6 +4,8 @@ import * as cdk from 'aws-cdk-lib';
 import { KmsStack } from '../lib/stacks/kms-stack';
 import { NetworkingStack } from '../lib/stacks/networking-stack';
 import { DataStack } from '../lib/stacks/data-stack';
+import { DocDbStack } from '../lib/stacks/docdb-stack';
+import { DocDbApiHandlerStack } from '../lib/stacks/docdb-api-handler-stack';
 import { AuthorizerStack } from '../lib/stacks/authorizer-stack';
 import { ApiHandlerStack } from '../lib/stacks/api-handler-stack';
 import { ProberStack } from '../lib/stacks/prober-stack';
@@ -36,6 +38,20 @@ const data = new DataStack(app, 'CloudAccelData', {
   env, tags, vpc: networking.vpc, kmsKey: kms.key,
 });
 
+// DocumentDB cluster — same VPC as the rest of the platform
+const docdb = new DocDbStack(app, 'CloudAccelDocDb', {
+  env, tags, vpc: networking.vpc, kmsKey: kms.key,
+});
+
+const docDbApiHandler = new DocDbApiHandlerStack(app, 'CloudAccelDocDbApiHandler', {
+  env, tags,
+  vpc: networking.vpc,
+  kmsKey: kms.key,
+  cluster: docdb.cluster,
+  clusterSecurityGroup: docdb.clusterSecurityGroup,
+  credentialsSecret: docdb.credentialsSecret,
+});
+
 const alerting = new AlertingStack(app, 'CloudAccelAlerting', {
   env, tags, kmsKey: kms.key,
 });
@@ -58,6 +74,7 @@ const api = new ApiStack(app, 'CloudAccelApi', {
   vpcEndpointId: networking.apiGwVpcEndpoint.vpcEndpointId,
   authorizerFunction: authorizer.authorizerFunction,
   apiFunction: apiHandler.apiFunction,
+  docDbApiFunction: docDbApiHandler.apiFunction,
 });
 
 const privateLink = new PrivateLinkStack(app, 'CloudAccelPrivateLink', {
@@ -77,6 +94,8 @@ new ObservabilityStack(app, 'CloudAccelObservability', {
   privateLinkStack: privateLink,
   authorizerLogGroup: authorizer.logGroup,
   proberLogGroup: prober.logGroup,
+  docDbApiFunction: docDbApiHandler.apiFunction,
+  docDbClusterIdentifier: docdb.cluster.clusterIdentifier,
 });
 
 app.synth();
