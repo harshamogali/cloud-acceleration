@@ -36,6 +36,13 @@ export class PrivateLinkStack extends cdk.Stack {
           VpcEndpointIds: [props.apiGwVpcEndpoint.vpcEndpointId],
         },
         physicalResourceId: cr.PhysicalResourceId.of(props.apiGwVpcEndpoint.vpcEndpointId),
+        // Filter response to only the fields we read - keeps the CFN custom
+        // resource payload under the 4 KB limit.
+        outputPaths: [
+          'VpcEndpoints.0.NetworkInterfaceIds.0',
+          'VpcEndpoints.0.NetworkInterfaceIds.1',
+          'VpcEndpoints.0.NetworkInterfaceIds.2',
+        ],
       },
       policy: cr.AwsCustomResourcePolicy.fromSdkCalls({
         resources: cr.AwsCustomResourcePolicy.ANY_RESOURCE,
@@ -58,6 +65,14 @@ export class PrivateLinkStack extends cdk.Stack {
         physicalResourceId: cr.PhysicalResourceId.of(
           `${props.apiGwVpcEndpoint.vpcEndpointId}-nis`,
         ),
+        // Filter response: NetworkInterfaces is otherwise huge (full attachment,
+        // SG, VPC, subnet detail per ENI) and exceeds the 4 KB CFN custom
+        // resource payload limit.
+        outputPaths: [
+          'NetworkInterfaces.0.PrivateIpAddress',
+          'NetworkInterfaces.1.PrivateIpAddress',
+          'NetworkInterfaces.2.PrivateIpAddress',
+        ],
       },
       policy: cr.AwsCustomResourcePolicy.fromSdkCalls({
         resources: cr.AwsCustomResourcePolicy.ANY_RESOURCE,
