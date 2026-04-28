@@ -107,19 +107,17 @@ export class DocDbStack extends cdk.Stack {
     // into the cluster's VPC. The cluster's SG ingress is wired automatically.
     this.cluster.addRotationSingleUser(cdk.Duration.days(30));
 
-    // Enable Performance Insights / DB Insights on every instance — NIST AU-12.
+    // Enable Performance Insights / DB Insights on every instance - NIST AU-12.
     // The L2 construct does not surface this flag; toggle it on the underlying
-    // CfnDBInstance children. Performance Insights retention defaults to 7 days
-    // (free tier); raise to 31 to cover monthly trend analysis.
+    // CfnDBInstance children. AWS::DocDB::DBInstance does not (yet) accept
+    // PerformanceInsightsKMSKeyId or PerformanceInsightsRetentionPeriod via
+    // CloudFormation -- it strict-validates and rejects them. So Performance
+    // Insights uses the default AWS-managed KMS key and 7-day retention.
+    // To use the platform CMK and longer retention, run modify-db-instance
+    // post-deploy or via a custom resource.
     for (const node of this.cluster.node.findAll()) {
       if (node instanceof docdb.CfnDBInstance) {
         node.enablePerformanceInsights = true;
-        // KMS key and retention are not exposed as L1 props on CfnDBInstance
-        // (DocumentDB), but the underlying CloudFormation resource accepts
-        // them. Add as overrides so DB Insights uses the platform CMK with
-        // 31-day retention.
-        node.addPropertyOverride('PerformanceInsightsKMSKeyId', props.kmsKey.keyArn);
-        node.addPropertyOverride('PerformanceInsightsRetentionPeriod', 31);
       }
     }
 

@@ -64,11 +64,12 @@ describe('DocDbStack', () => {
     template.resourceCountIs('AWS::DocDB::DBInstance', 3);
   });
 
-  test('every instance has Performance Insights (DB Insights) enabled with CMK', () => {
+  test('every instance has Performance Insights (DB Insights) enabled', () => {
+    // Note: AWS::DocDB::DBInstance does not expose PerformanceInsightsKMSKeyId
+    // or PerformanceInsightsRetentionPeriod in CloudFormation; default
+    // AWS-managed key and 7-day retention apply.
     template.allResourcesProperties('AWS::DocDB::DBInstance', {
       EnablePerformanceInsights: true,
-      PerformanceInsightsKMSKeyId: Match.anyValue(),
-      PerformanceInsightsRetentionPeriod: 31,
     });
   });
 
